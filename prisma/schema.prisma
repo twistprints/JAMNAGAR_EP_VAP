@@ -201,10 +201,14 @@ model Document {
   submissionId String
   submission   Submission   @relation(fields: [submissionId], references: [id], onDelete: Cascade)
   category     String       // "RC" | "PUC" | "INSURANCE" | "DRIVING_LICENSE" | "AADHAAR" | "DRIVER_PHOTO" | "OTHER"
-  filePath     String
+  storageBucket String?     @default("jamnagar-documents")
+  storagePath  String?
+  filePath     String       // Supabase storage path
   fileName     String
   fileSize     Int
   mimeType     String
+  checksum     String?
+  uploadedById String?
   pageNumber   Int          @default(1)
   uploadedAt   DateTime     @default(now())
 

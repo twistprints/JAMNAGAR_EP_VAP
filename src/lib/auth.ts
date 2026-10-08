@@ -1,13 +1,7 @@
-import bcrypt from "bcryptjs";
-import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "./prisma";
 import { getSupabaseAdmin, supabaseClient } from "./supabase";
-
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || "jamnagar_pass_mgmt_super_secret_jwt_key_2026_prod"
-);
 
 export const AUTH_COOKIE_NAME = "jamnagar_session_token";
 
@@ -20,83 +14,55 @@ export interface SessionPayload {
   authUserId?: string | null;
 }
 
-export async function hashPassword(password: string): Promise<string> {
-  return bcrypt.hash(password, 10);
-}
+/**
+ * Verifies a Supabase access token directly with Supabase Auth.
+ */
+export async function verifySupabaseToken(
+  token: string
+): Promise<{ id: string; email?: string } | null> {
+  if (!token || token.trim() === "") return null;
 
-export async function verifyPassword(password: string, hash: string): Promise<boolean> {
-  return bcrypt.compare(password, hash);
-}
-
-export async function createSessionToken(payload: SessionPayload): Promise<string> {
-  return new SignJWT({ ...payload })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setExpirationTime("30d") // 30-day persistent session
-    .sign(JWT_SECRET);
-}
-
-export async function verifySessionToken(token: string): Promise<SessionPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
-    return payload as unknown as SessionPayload;
-  } catch (err: any) {
-    return null;
+    const admin = getSupabaseAdmin();
+    if (admin) {
+      const { data, error } = await admin.auth.getUser(token);
+      if (!error && data?.user) {
+        return { id: data.user.id, email: data.user.email };
+      }
+    }
+
+    if (supabaseClient) {
+      const { data, error } = await supabaseClient.auth.getUser(token);
+      if (!error && data?.user) {
+        return { id: data.user.id, email: data.user.email };
+      }
+    }
+  } catch (err) {
+    // Supabase Auth verification error
   }
+
+  return null;
 }
 
 /**
- * Retrieves the current authenticated user session from cookies or headers
+ * Retrieves the current authenticated user session from cookies.
  */
 export async function getCurrentUser(): Promise<SessionPayload | null> {
   try {
     const cookieStore = cookies();
     const token = cookieStore.get(AUTH_COOKIE_NAME)?.value;
     if (!token) return null;
-    return await verifySessionToken(token);
-  } catch (error: any) {
-    return null;
-  }
-}
 
-/**
- * Authenticates an incoming Next.js API request.
- * Reads token from HTTP-only cookie, Authorization Bearer header, or custom session token header.
- */
-export async function authenticateRequest(req: NextRequest): Promise<SessionPayload | null> {
-  let session: SessionPayload | null = null;
+    const authUser = await verifySupabaseToken(token);
+    if (!authUser) return null;
 
-  // 1. Check HTTP-only cookie first
-  const token = req.cookies.get(AUTH_COOKIE_NAME)?.value;
-  if (token) {
-    session = await verifySessionToken(token);
-  }
-
-  // 2. Fallback: Check Authorization Bearer header
-  if (!session) {
-    const authHeader = req.headers.get("authorization");
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      const bearerToken = authHeader.substring(7).trim();
-      if (bearerToken) {
-        session = await verifySessionToken(bearerToken);
-      }
-    }
-  }
-
-  // 3. Fallback: Check x-session-token custom header
-  if (!session) {
-    const customHeaderToken = req.headers.get("x-session-token");
-    if (customHeaderToken) {
-      session = await verifySessionToken(customHeaderToken.trim());
-    }
-  }
-
-  if (!session) return null;
-
-  // Verify user existence and active status directly against the database (authoritative check)
-  try {
-    const dbUser = await prisma.user.findUnique({
-      where: { id: session.userId },
+    const dbUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { authUserId: authUser.id },
+          ...(authUser.email ? [{ email: authUser.email.toLowerCase() }] : []),
+        ],
+      },
       select: {
         id: true,
         username: true,
@@ -112,25 +78,100 @@ export async function authenticateRequest(req: NextRequest): Promise<SessionPayl
       return null;
     }
 
-    // Always use authoritative database role
     return {
       userId: dbUser.id,
       username: dbUser.username,
       name: dbUser.name,
       email: dbUser.email,
       role: dbUser.role as "ADMIN" | "FIELD_USER",
-      authUserId: dbUser.authUserId,
+      authUserId: dbUser.authUserId || authUser.id,
+    };
+  } catch (error: any) {
+    return null;
+  }
+}
+
+/**
+ * Authenticates an incoming Next.js API request via Supabase Auth.
+ * Reads token from HTTP-only cookie, Authorization Bearer header, or custom session token header.
+ */
+export async function authenticateRequest(req: NextRequest): Promise<SessionPayload | null> {
+  let token = req.cookies.get(AUTH_COOKIE_NAME)?.value;
+
+  if (!token) {
+    const authHeader = req.headers.get("authorization");
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.substring(7).trim();
+    }
+  }
+
+  if (!token) {
+    const customHeaderToken = req.headers.get("x-session-token");
+    if (customHeaderToken) {
+      token = customHeaderToken.trim();
+    }
+  }
+
+  if (!token) return null;
+
+  // 1. Verify token with Supabase Auth authority
+  const authUser = await verifySupabaseToken(token);
+  if (!authUser) return null;
+
+  // 2. Fetch authoritative user profile and role from database
+  try {
+    const dbUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { authUserId: authUser.id },
+          ...(authUser.email ? [{ email: authUser.email.toLowerCase() }] : []),
+        ],
+      },
+      select: {
+        id: true,
+        username: true,
+        name: true,
+        email: true,
+        role: true,
+        active: true,
+        authUserId: true,
+      },
+    });
+
+    if (!dbUser || !dbUser.active) {
+      return null;
+    }
+
+    // Link authUserId if not set
+    if (!dbUser.authUserId) {
+      try {
+        await prisma.user.update({
+          where: { id: dbUser.id },
+          data: { authUserId: authUser.id },
+        });
+      } catch (_) {}
+    }
+
+    return {
+      userId: dbUser.id,
+      username: dbUser.username,
+      name: dbUser.name,
+      email: dbUser.email,
+      role: dbUser.role as "ADMIN" | "FIELD_USER",
+      authUserId: dbUser.authUserId || authUser.id,
     };
   } catch (dbErr) {
-    // If database lookup fails temporarily, return verified token session
-    return session;
+    console.error("Database lookup error during auth:", dbErr);
+    return null;
   }
 }
 
 /**
  * Standard Server-Side Auth Guards
  */
-export async function requireAuth(req: NextRequest): Promise<{ user: SessionPayload } | { errorResponse: NextResponse }> {
+export async function requireAuth(
+  req: NextRequest
+): Promise<{ user: SessionPayload } | { errorResponse: NextResponse }> {
   const user = await authenticateRequest(req);
   if (!user) {
     return {

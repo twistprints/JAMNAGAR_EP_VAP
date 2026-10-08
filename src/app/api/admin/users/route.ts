@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { authenticateRequest, hashPassword, requireAdminResponse, requireAuthResponse } from "@/lib/auth";
+import { authenticateRequest, requireAdminResponse, requireAuthResponse } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
@@ -51,7 +51,7 @@ export async function GET(req: NextRequest) {
 }
 
 /**
- * POST /api/admin/users - Create a new Field User (Admin only)
+ * POST /api/admin/users - Create a new Field User via Supabase Auth (Admin only)
  */
 export async function POST(req: NextRequest) {
   try {
@@ -69,13 +69,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (password.length < 6) {
+      return NextResponse.json(
+        { error: "Password must be at least 6 characters long." },
+        { status: 400 }
+      );
+    }
+
     const cleanUsername = (username || email.split("@")[0]).trim().toLowerCase();
     const cleanEmail = (email || `${cleanUsername}@jamnagar.gov.in`).trim().toLowerCase();
 
     // Enforce role rule: Admin can only create FIELD_USER accounts through this interface
     const assignedRole = role === "ADMIN" ? "FIELD_USER" : (role || "FIELD_USER");
 
-    // Check for existing user
+    // Check for existing user in database
     const existing = await prisma.user.findFirst({
       where: {
         OR: [
@@ -87,46 +94,49 @@ export async function POST(req: NextRequest) {
 
     if (existing) {
       return NextResponse.json(
-        { error: "A user with this Username or Email already exists." },
+        { error: "A user with this Username or Email already exists in the system." },
         { status: 409 }
       );
     }
 
-    const passwordHash = await hashPassword(password);
-    let authUserId: string | null = null;
-
-    // Create user in Supabase Auth via Admin Service Role if configured
     const supabaseAdmin = getSupabaseAdmin();
-    if (supabaseAdmin) {
-      try {
-        const { data: sbData, error: sbError } = await supabaseAdmin.auth.admin.createUser({
-          email: cleanEmail,
-          password: password,
-          email_confirm: true,
-          user_metadata: {
-            name: name.trim(),
-            role: assignedRole,
-            username: cleanUsername,
-          },
-        });
-
-        if (!sbError && sbData.user) {
-          authUserId = sbData.user.id;
-        } else if (sbError) {
-          console.warn("Supabase Auth admin createUser notice:", sbError.message);
-        }
-      } catch (sbEx) {
-        console.warn("Supabase Auth admin exception:", sbEx);
-      }
+    if (!supabaseAdmin) {
+      return NextResponse.json(
+        { error: "Supabase service role is not configured. Cannot provision user in Supabase Auth." },
+        { status: 500 }
+      );
     }
 
+    // 1. Create user in Supabase Auth
+    const { data: sbData, error: sbError } = await supabaseAdmin.auth.admin.createUser({
+      email: cleanEmail,
+      password: password,
+      email_confirm: true,
+      user_metadata: {
+        name: name.trim(),
+        role: assignedRole,
+        username: cleanUsername,
+      },
+    });
+
+    if (sbError || !sbData.user) {
+      console.error("Supabase Auth admin createUser error:", sbError?.message);
+      return NextResponse.json(
+        { error: `Supabase Auth error: ${sbError?.message || "Failed to create authentication user."}` },
+        { status: 400 }
+      );
+    }
+
+    const authUserId = sbData.user.id;
+
+    // 2. Create profile in application database
     const newUser = await prisma.user.create({
       data: {
         username: cleanUsername,
         name: name.trim(),
         email: cleanEmail,
         phone: phone ? phone.trim() : null,
-        passwordHash,
+        passwordHash: "",
         authUserId,
         role: assignedRole,
         active: active !== undefined ? Boolean(active) : true,
@@ -139,7 +149,7 @@ export async function POST(req: NextRequest) {
       action: "CREATE_USER",
       resourceType: "USER",
       resourceId: newUser.id,
-      details: `Created new ${assignedRole} account for ${newUser.name} (${newUser.username})`,
+      details: `Created new ${assignedRole} account for ${newUser.name} (${newUser.username}) via Supabase Auth`,
     });
 
     return NextResponse.json({
@@ -157,6 +167,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (error: any) {
     console.error("Error creating user:", error);
-    return NextResponse.json({ error: "Failed to create user." }, { status: 500 });
+    return NextResponse.json({ error: error?.message || "Failed to create user." }, { status: 500 });
   }
 }

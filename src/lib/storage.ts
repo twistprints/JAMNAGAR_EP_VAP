@@ -1,53 +1,167 @@
-import fs from "fs";
+import crypto from "crypto";
 import path from "path";
 import JSZip from "jszip";
+import { getSupabaseAdmin, ensureStorageBucketExists, STORAGE_BUCKET } from "@/lib/supabase";
 
-const BASE_STORAGE_DIR = path.resolve(process.cwd(), "uploads", "JAMNAGAR");
-
+/**
+ * Normalizes vehicle number string (e.g. "GJ 10 AB 1234" -> "GJ10AB1234")
+ */
 export function normalizeVehicleNo(vNo: string): string {
   if (!vNo) return "";
   return vNo.toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
-export function getVehicleFolder(dateStr: string, normalizedVehicleNo: string): string {
-  const dateFormatted = dateStr ? dateStr.split("T")[0] : new Date().toISOString().split("T")[0];
-  const targetDir = path.join(BASE_STORAGE_DIR, dateFormatted, normalizedVehicleNo);
-  if (!fs.existsSync(targetDir)) {
-    fs.mkdirSync(targetDir, { recursive: true });
+/**
+ * Maps document category to EP or VAP storage group
+ */
+export function getStorageGroupForCategory(category: string): "EP" | "VAP" | "OTHER" {
+  const cat = (category || "").toUpperCase();
+  if (cat === "DRIVER_PHOTO" || cat === "PHOTO" || cat === "AADHAAR" || cat === "DRIVING_LICENSE" || cat === "DL") {
+    return "EP";
   }
-  return targetDir;
+  if (cat === "RC" || cat === "PUC" || cat === "INSURANCE" || cat === "FITNESS" || cat === "PERMIT") {
+    return "VAP";
+  }
+  return "OTHER";
 }
 
-export function getCategoryFolder(dateStr: string, normalizedVehicleNo: string, category: string): string {
-  const vehicleDir = getVehicleFolder(dateStr, normalizedVehicleNo);
-  const catDir = path.join(vehicleDir, category.toUpperCase());
-  if (!fs.existsSync(catDir)) {
-    fs.mkdirSync(catDir, { recursive: true });
-  }
-  return catDir;
-}
-
-export async function saveDocumentFile(
-  fileBuffer: Buffer,
+/**
+ * Builds structured Supabase Storage object path:
+ * JAMNAGAR/{YYYY-MM-DD}/{batchNumber}/{passPairId}/{group}/{category}/original{ext}
+ */
+export function buildDocumentStoragePath(
   dateStr: string,
-  normalizedVehicleNo: string,
-  category: string,
-  originalFilename: string
-): Promise<{ relativePath: string; fullPath: string; fileName: string }> {
-  const catDir = getCategoryFolder(dateStr, normalizedVehicleNo, category);
+  batchNumber: string = "BATCH-001",
+  passPairId: string = "PASS-000001",
+  category: string = "OTHER",
+  originalFilename: string = "document.jpg"
+): string {
+  const dateFormatted = dateStr ? dateStr.split("T")[0] : new Date().toISOString().split("T")[0];
+  const safeBatch = (batchNumber || "BATCH-001").replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase();
+  const safePassPair = (passPairId || "PASS-000001").replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase();
+  const catUpper = category.toUpperCase().trim();
+  const group = getStorageGroupForCategory(catUpper);
   const ext = path.extname(originalFilename) || ".jpg";
-  const timestamp = Date.now();
-  const safeName = `${category.toUpperCase()}_${timestamp}${ext}`;
-  const fullPath = path.join(catDir, safeName);
 
-  await fs.promises.writeFile(fullPath, fileBuffer);
-
-  // Relative path from project root for storage in DB
-  const relativePath = path.relative(process.cwd(), fullPath).replace(/\\/g, "/");
-
-  return { relativePath, fullPath, fileName: safeName };
+  return `JAMNAGAR/${dateFormatted}/${safeBatch}/${safePassPair}/${group}/${catUpper}/original${ext}`;
 }
 
+/**
+ * Computes SHA-256 checksum of a file buffer
+ */
+export function computeFileChecksum(buffer: Buffer): string {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+/**
+ * Uploads a file buffer directly to the private Supabase Storage bucket 'jamnagar-documents'
+ */
+export async function uploadDocumentToSupabase(
+  fileBuffer: Buffer,
+  mimeType: string,
+  storagePath: string
+): Promise<{ success: boolean; path: string; error?: string }> {
+  await ensureStorageBucketExists();
+  const admin = getSupabaseAdmin();
+
+  if (!admin) {
+    return {
+      success: false,
+      path: storagePath,
+      error: "Supabase storage is not configured (SUPABASE_SERVICE_ROLE_KEY missing).",
+    };
+  }
+
+  try {
+    const { error } = await admin.storage
+      .from(STORAGE_BUCKET)
+      .upload(storagePath, fileBuffer, {
+        contentType: mimeType || "image/jpeg",
+        upsert: true,
+      });
+
+    if (error) {
+      console.error(`Supabase Storage upload error for ${storagePath}:`, error.message);
+      return { success: false, path: storagePath, error: error.message };
+    }
+
+    return { success: true, path: storagePath };
+  } catch (err: any) {
+    console.error(`Supabase Storage upload exception for ${storagePath}:`, err);
+    return { success: false, path: storagePath, error: err?.message || "Storage upload failed" };
+  }
+}
+
+/**
+ * Generates a short-lived signed URL (default 300s / 5 mins) for private document access.
+ * Does NOT log signed URLs.
+ */
+export async function getSignedDocumentUrl(
+  storagePath: string,
+  expiresInSeconds: number = 300
+): Promise<string | null> {
+  const admin = getSupabaseAdmin();
+  if (!admin || !storagePath) return null;
+
+  try {
+    const { data, error } = await admin.storage
+      .from(STORAGE_BUCKET)
+      .createSignedUrl(storagePath, expiresInSeconds);
+
+    if (error || !data?.signedUrl) {
+      return null;
+    }
+
+    return data.signedUrl;
+  } catch (err: any) {
+    return null;
+  }
+}
+
+/**
+ * Downloads a document buffer directly from Supabase Storage server-side.
+ */
+export async function downloadDocumentBuffer(storagePath: string): Promise<Buffer | null> {
+  const admin = getSupabaseAdmin();
+  if (!admin || !storagePath) return null;
+
+  try {
+    const { data, error } = await admin.storage
+      .from(STORAGE_BUCKET)
+      .download(storagePath);
+
+    if (error || !data) {
+      return null;
+    }
+
+    const arrayBuffer = await data.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  } catch (err: any) {
+    return null;
+  }
+}
+
+/**
+ * Deletes a document object from Supabase Storage
+ */
+export async function deleteDocumentFromStorage(storagePath: string): Promise<boolean> {
+  const admin = getSupabaseAdmin();
+  if (!admin || !storagePath) return false;
+
+  try {
+    const { error } = await admin.storage
+      .from(STORAGE_BUCKET)
+      .remove([storagePath]);
+
+    return !error;
+  } catch (err: any) {
+    return false;
+  }
+}
+
+/**
+ * Generates an in-memory ZIP archive of a vehicle's documents downloaded from Supabase Storage
+ */
 export async function createVehicleBackupZip(
   submission: {
     submissionNo: string;
@@ -60,6 +174,7 @@ export async function createVehicleBackupZip(
     documents: Array<{
       category: string;
       filePath: string;
+      storagePath?: string | null;
       fileName: string;
     }>;
     extractions?: Array<any>;
@@ -69,14 +184,14 @@ export async function createVehicleBackupZip(
   const rootFolderName = `${submission.normalizedVehicleNo}_DOCUMENTS`;
   const rootZip = zip.folder(rootFolderName) || zip;
 
-  // Add document files into category folders
+  // Add document files into category folders downloaded from Supabase Storage
   for (const doc of submission.documents) {
-    const fullPath = path.resolve(process.cwd(), doc.filePath);
-    if (fs.existsSync(fullPath)) {
-      const fileData = await fs.promises.readFile(fullPath);
+    const sPath = doc.storagePath || doc.filePath;
+    const fileBuffer = await downloadDocumentBuffer(sPath);
+    if (fileBuffer && fileBuffer.length > 0) {
       const catFolder = rootZip.folder(doc.category.toUpperCase());
       if (catFolder) {
-        catFolder.file(doc.fileName, fileData);
+        catFolder.file(doc.fileName, fileBuffer);
       }
     }
   }
@@ -95,6 +210,7 @@ export async function createVehicleBackupZip(
     documents: submission.documents.map((d) => ({
       category: d.category,
       fileName: d.fileName,
+      storagePath: d.storagePath || d.filePath,
     })),
   };
 

@@ -1,18 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { jwtVerify } from "jose";
-
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || "jamnagar_pass_mgmt_super_secret_jwt_key_2026_prod"
-);
+import { decodeJwt } from "jose";
 
 const AUTH_COOKIE_NAME = "jamnagar_session_token";
-
-interface TokenPayload {
-  userId: string;
-  username: string;
-  role: "ADMIN" | "FIELD_USER";
-  name: string;
-}
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -29,20 +18,31 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  // 2. Extract session token from cookie, header, or bearer
+  // 2. Extract Supabase session token from cookie, header, or bearer
   const token =
     req.cookies.get(AUTH_COOKIE_NAME)?.value ||
     (req.headers.get("authorization")?.startsWith("Bearer ")
       ? req.headers.get("authorization")?.substring(7).trim()
       : null);
 
-  let session: TokenPayload | null = null;
+  let isValidSession = false;
+  let userRole: "ADMIN" | "FIELD_USER" | null = null;
+
   if (token) {
     try {
-      const { payload } = await jwtVerify(token, JWT_SECRET);
-      session = payload as unknown as TokenPayload;
+      const payload = decodeJwt(token);
+      const currentTime = Math.floor(Date.now() / 1000);
+
+      // Check if token has subject (user ID) and is not expired
+      if (payload && payload.sub && (!payload.exp || payload.exp > currentTime)) {
+        isValidSession = true;
+        const metaRole = (payload.user_metadata as any)?.role || (payload.app_metadata as any)?.role;
+        if (metaRole === "ADMIN" || metaRole === "FIELD_USER") {
+          userRole = metaRole;
+        }
+      }
     } catch (e) {
-      session = null;
+      isValidSession = false;
     }
   }
 
@@ -50,9 +50,9 @@ export async function middleware(req: NextRequest) {
   const isLoginPage = pathname === "/admin/login" || pathname === "/user/login" || pathname === "/login";
   
   if (isLoginPage) {
-    if (session) {
-      // If already logged in, redirect to their assigned portal
-      const target = session.role === "ADMIN" ? "/admin" : "/field";
+    if (isValidSession) {
+      // If already logged in, redirect to assigned portal
+      const target = userRole === "ADMIN" ? "/admin" : "/field";
       return NextResponse.redirect(new URL(target, req.url));
     }
     return NextResponse.next();
@@ -63,7 +63,7 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  // 5. Protect API routes (API route handlers handle detailed auth verification)
+  // 5. API routes pass through to route handlers (they perform authoritative verification)
   if (pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
@@ -74,13 +74,13 @@ export async function middleware(req: NextRequest) {
       return NextResponse.next();
     }
 
-    if (!session) {
+    if (!isValidSession) {
       const loginUrl = new URL("/admin/login", req.url);
       loginUrl.searchParams.set("redirect", pathname);
       return NextResponse.redirect(loginUrl);
     }
 
-    if (session.role !== "ADMIN") {
+    if (userRole === "FIELD_USER") {
       // FIELD_USER trying to access admin portal -> redirect to /field
       return NextResponse.redirect(new URL("/field", req.url));
     }
@@ -90,7 +90,7 @@ export async function middleware(req: NextRequest) {
 
   // 7. Protect Field Web Portal (/field/*)
   if (pathname.startsWith("/field")) {
-    if (!session) {
+    if (!isValidSession) {
       const loginUrl = new URL("/user/login", req.url);
       loginUrl.searchParams.set("redirect", pathname);
       return NextResponse.redirect(loginUrl);

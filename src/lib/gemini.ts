@@ -261,54 +261,71 @@ export async function verifyGeminiConnection(): Promise<{
 }
 
 export async function extractDocumentData(
-  imagePath: string,
+  imageInput: string | Buffer,
   category: string,
-  hintVehicleNo?: string
+  options?: {
+    mimeType?: string;
+    fileName?: string;
+    hintVehicleNo?: string;
+  } | string
 ): Promise<DocumentExtractionResult> {
   const normalizedCategory = category.toUpperCase().replace(/\s+/g, "_");
   const schemaConfig = EXTRACTION_SCHEMAS[normalizedCategory] || EXTRACTION_SCHEMAS.RC;
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   const modelName = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
-  const absoluteImagePath = path.isAbsolute(imagePath)
-    ? imagePath
-    : path.resolve(process.cwd(), imagePath);
-
-  const fileExists = fs.existsSync(absoluteImagePath);
+  let fileBuffer: Buffer | null = null;
   let fileSize = 0;
-  let mimeType = "unknown";
+  let mimeType = "image/jpeg";
+  let docName = "document.jpg";
 
-  if (fileExists) {
-    try {
-      const stat = fs.statSync(absoluteImagePath);
-      fileSize = stat.size;
-      mimeType = getMimeType(absoluteImagePath);
-    } catch (_) {}
+  if (Buffer.isBuffer(imageInput)) {
+    fileBuffer = imageInput;
+    fileSize = imageInput.length;
+    if (typeof options === "object" && options) {
+      if (options.mimeType) mimeType = options.mimeType;
+      if (options.fileName) docName = options.fileName;
+    }
+  } else if (typeof imageInput === "string") {
+    const absoluteImagePath = path.isAbsolute(imageInput)
+      ? imageInput
+      : path.resolve(process.cwd(), imageInput);
+    docName = path.basename(absoluteImagePath);
+
+    if (fs.existsSync(absoluteImagePath)) {
+      try {
+        fileBuffer = await fs.promises.readFile(absoluteImagePath);
+        fileSize = fileBuffer.length;
+        mimeType = getMimeType(absoluteImagePath);
+      } catch (_) {}
+    }
   }
+
+  const fileExists = fileBuffer !== null && fileBuffer.length > 0;
 
   // Exact requested Development Diagnostic Logs
   console.log("----------------------------------------");
   console.log("EXTRACTION STARTED");
-  console.log(`Document: ${path.basename(absoluteImagePath)}`);
+  console.log(`Document: ${docName}`);
   console.log(`Category: ${normalizedCategory}`);
-  console.log(`File exists: ${fileExists ? "YES" : "NO"}`);
+  console.log(`File available: ${fileExists ? "YES" : "NO"}`);
   console.log(`File size: ${fileSize} bytes (${(fileSize / 1024).toFixed(1)} KB)`);
   console.log(`MIME type: ${mimeType}`);
   console.log(`API key configured: ${apiKey && apiKey.length > 5 ? "YES" : "NO"}`);
   console.log(`Gemini model: ${modelName}`);
 
-  if (!fileExists) {
-    console.log("EXTRACTION FAILED: File does not exist on disk.");
+  if (!fileExists || !fileBuffer) {
+    console.log("EXTRACTION FAILED: Document data is empty or not available.");
     console.log("----------------------------------------");
     return {
       document_type: normalizedCategory.toLowerCase(),
       fields: createEmptyFields(schemaConfig.sampleFields),
-      warnings: ["File not found on local disk."],
+      warnings: ["Document data is not available."],
       raw_text: "",
       source: "GEMINI_ERROR",
       model: modelName,
-      errorMessage: "Document file not found on disk.",
-      error: "Document file not found on disk.",
+      errorMessage: "Document data not available.",
+      error: "Document data not available.",
     };
   }
 
@@ -345,8 +362,6 @@ export async function extractDocumentData(
         console.log(`Gemini request started (Model: ${activeModel}, Attempt: ${attempt})`);
         const genAI = new GoogleGenerativeAI(apiKey);
         const model = genAI.getGenerativeModel({ model: activeModel });
-
-        const fileBuffer = await fs.promises.readFile(absoluteImagePath);
 
         const result = await model.generateContent({
           contents: [

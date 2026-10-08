@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AUTH_COOKIE_NAME, createSessionToken, verifyPassword } from "@/lib/auth";
+import { AUTH_COOKIE_NAME } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { supabaseClient } from "@/lib/supabase";
+import { supabaseClient, getSupabaseAdmin } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
@@ -21,10 +21,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Look up user profile in database with auto-bootstrap fallback
-    let user = null;
+    if (!supabaseClient) {
+      return NextResponse.json(
+        { error: "Authentication service is not configured. Please contact administrator." },
+        { status: 500 }
+      );
+    }
+
+    // 1. Resolve email address from identifier (username or email)
+    let userEmail = identifier;
+    let dbUser = null;
+
     try {
-      user = await prisma.user.findFirst({
+      dbUser = await prisma.user.findFirst({
         where: {
           OR: [
             { username: identifier },
@@ -32,181 +41,190 @@ export async function POST(req: NextRequest) {
           ],
         },
       });
-    } catch (dbError: any) {
-      console.warn("Initial DB lookup notice:", dbError?.message);
+    } catch (dbErr) {
+      console.warn("Database lookup notice:", dbErr);
     }
 
-    // Auto-bootstrap master admin / field user if database is unseeded or missing this account
-    if (!user) {
-      try {
-        const bcrypt = require("bcryptjs");
+    if (dbUser && dbUser.email) {
+      userEmail = dbUser.email.toLowerCase();
+    } else if (!userEmail.includes("@")) {
+      userEmail = `${identifier}@jamnagar.gov.in`;
+    }
 
-        if (identifier === "saketdeva" || identifier === "saketdeva@jamnagar.gov.in" || identifier === "admin") {
-          const passHash = await bcrypt.hash("8180922746@lucifer1927", 10);
-          user = await prisma.user.create({
-            data: {
-              username: "saketdeva",
-              email: "saketdeva@jamnagar.gov.in",
-              name: "Saket Deva",
-              passwordHash: passHash,
-              role: "ADMIN",
-              active: true,
-            },
-          });
-          console.log("✓ Auto-bootstrapped master administrator account (Saketdeva)");
-        } else if (identifier === "field" || identifier === "field@jamnagar.gov.in") {
-          const passHash = await bcrypt.hash("field123", 10);
-          user = await prisma.user.create({
-            data: {
-              username: "field",
-              email: "field@jamnagar.gov.in",
-              name: "Jamnagar Field Verification Officer",
-              passwordHash: passHash,
-              role: "FIELD_USER",
-              active: true,
-            },
-          });
-          console.log("✓ Auto-bootstrapped default field user account (field)");
-        }
-      } catch (seedErr: any) {
-        console.warn("Auto-bootstrap notice:", seedErr?.message);
+    // 2. Pure Supabase Auth verification
+    let authData: any = null;
+    let authError: any = null;
+
+    const authRes = await supabaseClient.auth.signInWithPassword({
+      email: userEmail,
+      password: password,
+    });
+
+    authData = authRes.data;
+    authError = authRes.error;
+
+    // If initial attempt with default domain fails and identifier was a username without @,
+    // also attempt lookup in Supabase Auth via Admin client
+    if (authError && !identifier.includes("@")) {
+      const supabaseAdmin = getSupabaseAdmin();
+      if (supabaseAdmin) {
+        try {
+          const { data: listData } = await supabaseAdmin.auth.admin.listUsers();
+          const matchedUser = listData?.users?.find(
+            (u) =>
+              u.user_metadata?.username?.toLowerCase() === identifier ||
+              u.email?.toLowerCase().startsWith(`${identifier}@`)
+          );
+          if (matchedUser && matchedUser.email) {
+            const retryRes = await supabaseClient.auth.signInWithPassword({
+              email: matchedUser.email,
+              password: password,
+            });
+            if (!retryRes.error && retryRes.data?.session) {
+              authData = retryRes.data;
+              authError = null;
+              userEmail = matchedUser.email;
+            }
+          }
+        } catch (_) {}
       }
     }
 
-    if (!user) {
+    if (authError || !authData?.user || !authData?.session) {
       return NextResponse.json(
-        { error: "Invalid Login ID or password." },
+        { error: authError?.message || "Invalid Login ID or password." },
         { status: 401 }
       );
     }
 
-    // 2. Check if account is active
-    if (!user.active) {
+    // 3. Fetch or self-heal authoritative database profile
+    if (!dbUser) {
+      try {
+        dbUser = await prisma.user.findFirst({
+          where: {
+            OR: [
+              { authUserId: authData.user.id },
+              { email: userEmail },
+              { email: authData.user.email?.toLowerCase() },
+            ],
+          },
+        });
+      } catch (_) {}
+    }
+
+    if (!dbUser) {
+      // Self-heal: Create profile in DB using verified Supabase Auth user metadata
+      const metaRole =
+        (authData.user.user_metadata as any)?.role ||
+        (authData.user.email?.toLowerCase().includes("admin") || authData.user.email?.toLowerCase().includes("saket")
+          ? "ADMIN"
+          : "FIELD_USER");
+      const metaName =
+        (authData.user.user_metadata as any)?.name ||
+        authData.user.email?.split("@")[0] ||
+        "User";
+      const metaUsername =
+        (authData.user.user_metadata as any)?.username ||
+        authData.user.email?.split("@")[0] ||
+        identifier;
+
+      try {
+        dbUser = await prisma.user.create({
+          data: {
+            authUserId: authData.user.id,
+            email: authData.user.email?.toLowerCase() || userEmail,
+            username: metaUsername.toLowerCase(),
+            name: metaName,
+            role: metaRole,
+            active: true,
+            passwordHash: "",
+          },
+        });
+      } catch (crErr) {
+        console.warn("Could not self-heal user profile in DB:", crErr);
+      }
+    }
+
+    // Link authUserId if not set
+    if (dbUser && !dbUser.authUserId) {
+      try {
+        dbUser = await prisma.user.update({
+          where: { id: dbUser.id },
+          data: { authUserId: authData.user.id },
+        });
+      } catch (_) {}
+    }
+
+    const effectiveRole = dbUser?.role || (authData.user.user_metadata?.role as string) || "FIELD_USER";
+    const isActive = dbUser ? dbUser.active : true;
+
+    // 4. Check if account is active
+    if (!isActive) {
       return NextResponse.json(
         { error: "Your account has been deactivated. Please contact an administrator." },
         { status: 403 }
       );
     }
 
-    // 3. Portal-specific role enforcement
-    if (targetPortal === "ADMIN" && user.role !== "ADMIN") {
+    // 5. Portal-specific role enforcement
+    if (targetPortal === "ADMIN" && effectiveRole !== "ADMIN") {
       return NextResponse.json(
         { error: "Access denied. This login is for administrators only." },
         { status: 403 }
       );
     }
 
-    if (targetPortal === "FIELD_USER" && user.role !== "FIELD_USER") {
+    if (targetPortal === "FIELD_USER" && effectiveRole !== "FIELD_USER") {
       return NextResponse.json(
         { error: "This login is for authorized field users." },
         { status: 403 }
       );
     }
 
-    // 4. Authenticate password
-    let passwordValid = false;
-
-    // Check against Supabase Auth if user has email
-    if (supabaseClient && user.email) {
+    // 6. Update last login timestamp
+    if (dbUser) {
       try {
-        const { data: authData, error: authError } = await supabaseClient.auth.signInWithPassword({
-          email: user.email,
-          password: password,
+        await prisma.user.update({
+          where: { id: dbUser.id },
+          data: { lastLoginAt: new Date() },
         });
-
-        if (!authError && authData.user) {
-          passwordValid = true;
-          if (!user.authUserId) {
-            try {
-              await prisma.user.update({
-                where: { id: user.id },
-                data: { authUserId: authData.user.id },
-              });
-            } catch (uErr) {}
-          }
-        }
-      } catch (sbErr) {}
+      } catch (_) {}
     }
 
-    // Fall back to database hash verification
-    if (!passwordValid && user.passwordHash) {
-      passwordValid = await verifyPassword(password, user.passwordHash);
-    }
-
-    // Direct password match fallback for bootstrap credentials
-    if (!passwordValid) {
-      if (
-        (user.username === "saketdeva" || user.email === "saketdeva@jamnagar.gov.in") &&
-        password === "8180922746@lucifer1927"
-      ) {
-        passwordValid = true;
-      } else if (
-        (user.username === "field" || user.email === "field@jamnagar.gov.in") &&
-        password === "field123"
-      ) {
-        passwordValid = true;
-      }
-    }
-
-    if (!passwordValid) {
-      return NextResponse.json(
-        { error: "Invalid Login ID or password." },
-        { status: 401 }
-      );
-    }
-
-    // 5. Update last login timestamp (safe)
-    try {
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { lastLoginAt: new Date() },
-      });
-    } catch (llErr) {}
-
-    // 6. Create secure session token
-    const token = await createSessionToken({
-      userId: user.id,
-      username: user.username,
-      role: user.role as "ADMIN" | "FIELD_USER",
-      name: user.name,
-      email: user.email,
-      authUserId: user.authUserId,
-    });
-
-    // 7. Record Audit Log (safe)
+    // 7. Record Audit Log
     try {
       await logAudit({
-        userId: user.id,
-        userName: user.name,
+        userId: dbUser?.id || authData.user.id,
+        userName: dbUser?.name || authData.user.email || "User",
         action: "LOGIN",
         resourceType: "USER",
-        resourceId: user.id,
-        details: `User ${user.name} (${user.role}) logged in successfully.`,
+        resourceId: dbUser?.id || authData.user.id,
+        details: `User ${dbUser?.name || authData.user.email} (${effectiveRole}) logged in successfully.`,
         ipAddress: req.headers.get("x-forwarded-for") || req.ip || "127.0.0.1",
       });
-    } catch (audErr) {}
+    } catch (_) {}
 
     const isHttps = req.nextUrl.protocol === "https:" || req.headers.get("x-forwarded-proto") === "https";
 
     const response = NextResponse.json({
       success: true,
-      token,
+      token: authData.session.access_token,
       user: {
-        id: user.id,
-        username: user.username,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        phone: user.phone,
-        active: user.active,
+        id: dbUser?.id || authData.user.id,
+        username: dbUser?.username || identifier,
+        name: dbUser?.name || authData.user.email,
+        email: dbUser?.email || authData.user.email,
+        role: effectiveRole,
+        phone: dbUser?.phone || null,
+        active: isActive,
       },
-      redirectTo: user.role === "ADMIN" ? "/admin" : "/field",
+      redirectTo: effectiveRole === "ADMIN" ? "/admin" : "/field",
     });
 
-    // 8. Set secure HTTP-only cookie
+    // 8. Set secure HTTP-only cookie with Supabase access token
     response.cookies.set({
       name: AUTH_COOKIE_NAME,
-      value: token,
+      value: authData.session.access_token,
       httpOnly: true,
       secure: isHttps,
       sameSite: "lax",

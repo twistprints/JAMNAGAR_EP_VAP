@@ -1,6 +1,4 @@
 import { prisma } from "@/lib/prisma";
-import fs from "fs";
-import path from "path";
 import JSZip from "jszip";
 import {
   PassPairExportRecord,
@@ -9,6 +7,7 @@ import {
   generateMasterVAPExcel,
   generateMasterRegisterExcel,
 } from "@/lib/excel";
+import { downloadDocumentBuffer, createVehicleBackupZip } from "@/lib/storage";
 
 export interface ValidationResult {
   valid: boolean;
@@ -30,7 +29,7 @@ export function sanitizeFilenamePart(str: string): string {
 
 /**
  * Loads and validates submissions for export,
- * ensuring 1:1 EP-VAP link, sequence integrity, and photo loading.
+ * ensuring 1:1 EP-VAP link, sequence integrity, and photo loading from Supabase Storage.
  */
 export async function getValidatedExportData(filterOptions?: {
   batchId?: string;
@@ -68,7 +67,7 @@ export async function getValidatedExportData(filterOptions?: {
     where.id = { in: filterOptions.selectedIds };
   }
 
-  // Fetch submissions strictly ordered by createdAt
+  // Fetch submissions strictly ordered by createdAt / batchSequence
   const submissions = await prisma.submission.findMany({
     where,
     orderBy: [
@@ -98,22 +97,19 @@ export async function getValidatedExportData(filterOptions?: {
       errors.push(`VAP #${seq} (${sub.submissionNo}) is missing vehicle number.`);
     }
 
-    // Check passport photo document
-    const photoDoc = sub.documents.find((d) => d.category === "DRIVER_PHOTO");
+    // Check passport photo document from Supabase Storage
+    const photoDoc = sub.documents.find((d) => d.category === "DRIVER_PHOTO" || d.category === "PHOTO");
     let photoBuffer: Buffer | null = null;
     let photoMimeType = "image/jpeg";
 
     if (photoDoc) {
-      const fullPath = path.isAbsolute(photoDoc.filePath)
-        ? photoDoc.filePath
-        : path.resolve(process.cwd(), photoDoc.filePath);
-
-      if (fs.existsSync(fullPath)) {
+      const sPath = photoDoc.storagePath || photoDoc.filePath;
+      if (sPath) {
         try {
-          photoBuffer = await fs.promises.readFile(fullPath);
+          photoBuffer = await downloadDocumentBuffer(sPath);
           photoMimeType = photoDoc.mimeType || "image/jpeg";
         } catch (e) {
-          console.warn(`Could not read photo for EP #${seq}:`, e);
+          console.warn(`Could not load photo from storage for EP #${seq}:`, e);
         }
       }
     }
@@ -332,7 +328,7 @@ export async function generateFullExportZip(
 }
 
 /**
- * Generates Vehicle Archive ZIP with all document categories from R2 / Local
+ * Generates Vehicle Archive ZIP with all document categories from Supabase Storage
  */
 export async function generateVehicleBackupArchive(vehicleNumber: string): Promise<Buffer> {
   const cleanVeh = vehicleNumber.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
@@ -342,28 +338,14 @@ export async function generateVehicleBackupArchive(vehicleNumber: string): Promi
     },
     include: {
       documents: true,
+      extractions: true,
     },
   });
 
-  const zip = new JSZip();
-
-  if (sub && sub.documents.length > 0) {
-    for (const doc of sub.documents) {
-      const fullPath = path.isAbsolute(doc.filePath)
-        ? doc.filePath
-        : path.resolve(process.cwd(), doc.filePath);
-
-      if (fs.existsSync(fullPath)) {
-        try {
-          const buf = await fs.promises.readFile(fullPath);
-          const cat = doc.category || "OTHER";
-          zip.file(`${cat}/${doc.fileName}`, buf);
-        } catch (e) {
-          console.warn(`Error archiving doc ${doc.fileName}:`, e);
-        }
-      }
-    }
+  if (!sub) {
+    const emptyZip = new JSZip();
+    return emptyZip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   }
 
-  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+  return createVehicleBackupZip(sub);
 }

@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest, requireAuthResponse } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { saveDocumentFile } from "@/lib/storage";
+import {
+  buildDocumentStoragePath,
+  computeFileChecksum,
+  uploadDocumentToSupabase,
+} from "@/lib/storage";
 import { extractDocumentData } from "@/lib/gemini";
 import { recordAuditLog } from "@/lib/audit";
 import { reconcileSubmissionData } from "@/lib/reconciliation";
@@ -29,50 +33,77 @@ export async function POST(req: NextRequest) {
 
     const submission = await prisma.submission.findUnique({
       where: { id: submissionId },
-      include: { extractions: true },
+      include: { extractions: true, batch: true },
     });
 
     if (!submission) {
       return NextResponse.json({ error: "Submission not found." }, { status: 404 });
     }
 
-    // Convert file to Buffer
+    // Role check: FIELD_USER can only upload to their own submissions
+    if (user.role === "FIELD_USER" && submission.createdById && submission.createdById !== user.userId) {
+      return NextResponse.json({ error: "Unauthorized access to submission." }, { status: 403 });
+    }
+
+    // Convert file to in-memory Buffer (Zero local disk writes)
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
+    const mimeType = file.type || "image/jpeg";
+    const checksum = computeFileChecksum(buffer);
 
-    const dateStr = submission.createdAt.toISOString();
-    const { relativePath, fullPath, fileName } = await saveDocumentFile(
-      buffer,
+    // Build structured object path:
+    // JAMNAGAR/{YYYY-MM-DD}/{batchNumber}/{passPairId}/{group}/{category}/original{ext}
+    const dateStr = submission.createdAt ? submission.createdAt.toISOString() : new Date().toISOString();
+    const batchNo = submission.batch?.batchNumber || "BATCH-001";
+    const passPairId = submission.passPairId || submission.submissionNo;
+
+    const storagePath = buildDocumentStoragePath(
       dateStr,
-      submission.normalizedVehicleNo,
+      batchNo,
+      passPairId,
       category,
       file.name
     );
 
-    // Save document in DB
+    // Upload directly to private Supabase Storage bucket 'jamnagar-documents'
+    const uploadResult = await uploadDocumentToSupabase(buffer, mimeType, storagePath);
+
+    if (!uploadResult.success) {
+      console.error(`Storage upload failed for submission ${submission.submissionNo}:`, uploadResult.error);
+    }
+
+    // Save document metadata in DB
     const document = await prisma.document.create({
       data: {
         submissionId: submission.id,
         category: category.toUpperCase(),
-        filePath: relativePath,
-        fileName: fileName,
+        storageBucket: "jamnagar-documents",
+        storagePath: storagePath,
+        filePath: storagePath,
+        fileName: file.name,
         fileSize: buffer.length,
-        mimeType: file.type || "image/jpeg",
+        mimeType: mimeType,
+        checksum: checksum,
         pageNumber,
+        uploadedById: user.userId,
       },
     });
 
-    // Run AI Document Extraction Pipeline
+    // Run AI Document Extraction Pipeline directly in-memory from Buffer
     let extractionResult = null;
     try {
       extractionResult = await extractDocumentData(
-        fullPath,
+        buffer,
         category,
-        submission.vehicleNumber
+        {
+          mimeType,
+          fileName: file.name,
+          hintVehicleNo: submission.vehicleNumber,
+        }
       );
 
       // Upsert DocumentExtraction record
-      const extraction = await prisma.documentExtraction.create({
+      await prisma.documentExtraction.create({
         data: {
           submissionId: submission.id,
           documentId: document.id,
@@ -95,7 +126,7 @@ export async function POST(req: NextRequest) {
         if (f.engine_number?.value) updateData.engineNumber = f.engine_number.value;
       } else if (category.toUpperCase() === "AADHAAR") {
         if (f.aadhaar_number?.value) updateData.aadhaarNumber = f.aadhaar_number.value;
-      } else if (category.toUpperCase() === "DRIVING_LICENSE") {
+      } else if (category.toUpperCase() === "DRIVING_LICENSE" || category.toUpperCase() === "DL") {
         if (f.license_number?.value) updateData.licenseNumber = f.license_number.value;
         if (f.valid_to?.value || f.transport_valid_to?.value) {
           updateData.licenseValidTo = f.valid_to?.value || f.transport_valid_to?.value;
@@ -156,8 +187,9 @@ export async function POST(req: NextRequest) {
       resourceId: document.id,
       details: {
         category,
-        fileName,
+        fileName: file.name,
         fileSize: buffer.length,
+        storagePath,
         submissionNo: submission.submissionNo,
       },
     });
@@ -166,7 +198,7 @@ export async function POST(req: NextRequest) {
       success: true,
       document,
       extraction: extractionResult,
-      message: "Document uploaded and processed successfully.",
+      message: "Document uploaded to Supabase Storage and processed successfully.",
     });
   } catch (error: any) {
     console.error("Upload document error:", error);

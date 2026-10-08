@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest, requireAuthResponse } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
 import { reconcileSubmissionData } from "@/lib/reconciliation";
 
 export async function GET(

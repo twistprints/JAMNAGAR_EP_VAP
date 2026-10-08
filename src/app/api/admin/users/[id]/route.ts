@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { authenticateRequest, hashPassword, requireAdminResponse, requireAuthResponse } from "@/lib/auth";
+import { authenticateRequest, requireAdminResponse, requireAuthResponse } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
 /**
- * PATCH /api/admin/users/[id] - Activate/Deactivate user, Reset password, or edit user profile
+ * PATCH /api/admin/users/[id] - Activate/Deactivate user, Reset password via Supabase Auth, or edit profile
  */
 export async function PATCH(
   req: NextRequest,
@@ -27,52 +27,82 @@ export async function PATCH(
     });
 
     if (!targetUser) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 });
+      return NextResponse.json({ error: "User not found." }, { status: 404 });
     }
 
     const updateData: any = {};
     let auditAction = "UPDATE_USER";
     let auditDetails = `Updated user ${targetUser.username}`;
+    const supabaseAdmin = getSupabaseAdmin();
 
-    // Handle Active Status Toggle
+    // 1. Handle Active Status Toggle
     if (typeof active === "boolean") {
       updateData.active = active;
       auditAction = active ? "ENABLE_USER" : "DISABLE_USER";
       auditDetails = `${active ? "Activated" : "Deactivated"} user ${targetUser.username} (${targetUser.name})`;
 
-      // Update Supabase Auth ban status if configured
-      const supabaseAdmin = getSupabaseAdmin();
+      // Update Supabase Auth ban status
       if (supabaseAdmin && targetUser.authUserId) {
         try {
           await supabaseAdmin.auth.admin.updateUserById(targetUser.authUserId, {
             ban_duration: active ? "none" : "876000h",
           });
-        } catch (sbErr) {
-          console.warn("Supabase Auth ban update notice:", sbErr);
+        } catch (sbErr: any) {
+          console.warn("Supabase Auth ban update notice:", sbErr?.message);
         }
       }
     }
 
-    // Handle Password Reset
+    // 2. Handle Password Reset in Supabase Auth
     if (password && password.trim().length >= 6) {
-      updateData.passwordHash = await hashPassword(password.trim());
       auditAction = "PASSWORD_RESET";
-      auditDetails = `Reset password for user ${targetUser.username} (${targetUser.name})`;
+      auditDetails = `Reset password for user ${targetUser.username} (${targetUser.name}) in Supabase Auth`;
 
-      // Update Supabase Auth password if configured
-      const supabaseAdmin = getSupabaseAdmin();
       if (supabaseAdmin && targetUser.authUserId) {
         try {
-          await supabaseAdmin.auth.admin.updateUserById(targetUser.authUserId, {
-            password: password.trim(),
-          });
-        } catch (sbErr) {
-          console.warn("Supabase Auth password reset notice:", sbErr);
+          const { error: resetErr } = await supabaseAdmin.auth.admin.updateUserById(
+            targetUser.authUserId,
+            { password: password.trim() }
+          );
+
+          if (resetErr) {
+            console.error("Supabase Auth password reset error:", resetErr.message);
+            return NextResponse.json(
+              { error: `Supabase Auth password update failed: ${resetErr.message}` },
+              { status: 400 }
+            );
+          }
+        } catch (sbErr: any) {
+          console.error("Supabase Auth password update exception:", sbErr);
+          return NextResponse.json(
+            { error: `Failed to update password in Supabase Auth: ${sbErr?.message}` },
+            { status: 500 }
+          );
+        }
+      } else if (!targetUser.authUserId) {
+        // If user doesn't have an authUserId, try to find or create them in Supabase Auth
+        if (supabaseAdmin && targetUser.email) {
+          try {
+            const { data: created, error: crErr } = await supabaseAdmin.auth.admin.createUser({
+              email: targetUser.email,
+              password: password.trim(),
+              email_confirm: true,
+              user_metadata: {
+                name: targetUser.name,
+                role: targetUser.role,
+                username: targetUser.username,
+              },
+            });
+
+            if (!crErr && created.user) {
+              updateData.authUserId = created.user.id;
+            }
+          } catch (_) {}
         }
       }
     }
 
-    // Handle Name & Phone updates
+    // 3. Handle Name & Phone updates
     if (name && name.trim()) updateData.name = name.trim();
     if (phone !== undefined) updateData.phone = phone ? phone.trim() : null;
 
@@ -106,6 +136,6 @@ export async function PATCH(
     });
   } catch (error: any) {
     console.error("Error updating user:", error);
-    return NextResponse.json({ error: "Failed to update user." }, { status: 500 });
+    return NextResponse.json({ error: error?.message || "Failed to update user." }, { status: 500 });
   }
 }
