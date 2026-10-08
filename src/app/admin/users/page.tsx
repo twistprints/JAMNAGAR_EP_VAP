@@ -119,6 +119,8 @@ export default function AdminUsersPage() {
         body: JSON.stringify({
           name: createName.trim(),
           username: createLoginId.trim(),
+          loginId: createLoginId.trim(),
+          identifier: createLoginId.trim(),
           email: createEmail ? createEmail.trim() : undefined,
           phone: createPhone ? createPhone.trim() : undefined,
           password: createPassword,

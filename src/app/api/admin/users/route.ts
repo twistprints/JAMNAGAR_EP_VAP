@@ -60,9 +60,11 @@ export async function POST(req: NextRequest) {
     if (user.role !== "ADMIN") return requireAdminResponse();
 
     const body = await req.json().catch(() => ({}));
-    const { name, username, email, phone, password, role, active } = body;
+    const { name, username, email, phone, password, role, active, loginId, identifier } = body;
 
-    if (!name || !password || (!username && !email)) {
+    const rawIdentifier = (username || loginId || identifier || email || "").trim();
+
+    if (!name || !password || !rawIdentifier) {
       return NextResponse.json(
         { error: "Name, Login ID / Email, and Password are required." },
         { status: 400 }
@@ -76,8 +78,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const cleanUsername = (username || email.split("@")[0]).trim().toLowerCase();
-    const cleanEmail = (email || `${cleanUsername}@jamnagar.gov.in`).trim().toLowerCase();
+    let cleanUsername = rawIdentifier.toLowerCase();
+    let cleanEmail = (email || "").trim().toLowerCase();
+
+    if (rawIdentifier.includes("@")) {
+      cleanEmail = rawIdentifier;
+      cleanUsername = rawIdentifier.split("@")[0];
+    } else if (!cleanEmail) {
+      cleanEmail = `${cleanUsername}@jamnagar.gov.in`;
+    }
 
     // Enforce role rule: Admin can only create FIELD_USER accounts through this interface
     const assignedRole = role === "ADMIN" ? "FIELD_USER" : (role || "FIELD_USER");

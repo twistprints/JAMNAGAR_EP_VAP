@@ -59,16 +59,16 @@ export interface PassPairExportRecord {
  * Resolves master template file path with robust fallback hierarchy
  */
 function getTemplatePath(templateName: "EP" | "VAP"): string {
+  const projectDir = path.resolve(process.cwd(), "templates");
   const desktopDir = "C:\\Users\\ABHISHEK\\OneDrive\\Desktop";
   const downloadDir = "C:\\Users\\ABHISHEK\\Downloads";
-  const projectDir = path.resolve(process.cwd(), "templates");
 
   if (templateName === "EP") {
     const candidates = [
-      path.join(desktopDir, "LATEST EP FORMAT.xlsx"),
-      path.join(downloadDir, "LATEST EP FORMAT.xlsx"),
       path.join(projectDir, "LATEST_EP_FORMAT.xlsx"),
       path.join(projectDir, "Event_EP_Template.xlsx"),
+      path.join(desktopDir, "LATEST EP FORMAT.xlsx"),
+      path.join(downloadDir, "LATEST EP FORMAT.xlsx"),
       path.join(downloadDir, "Event EP format (2) (3).xlsx"),
     ];
     for (const p of candidates) {
@@ -76,10 +76,10 @@ function getTemplatePath(templateName: "EP" | "VAP"): string {
     }
   } else {
     const candidates = [
-      path.join(downloadDir, "LATEST VAP FORMAT.xlsx"),
-      path.join(desktopDir, "LATEST VAP FORMAT.xlsx"),
       path.join(projectDir, "LATEST_VAP_FORMAT.xlsx"),
       path.join(projectDir, "Event_VAP_Template.xlsx"),
+      path.join(downloadDir, "LATEST VAP FORMAT.xlsx"),
+      path.join(desktopDir, "LATEST VAP FORMAT.xlsx"),
       path.join(downloadDir, "Event VAP - Format (1).xlsx"),
     ];
     for (const p of candidates) {
