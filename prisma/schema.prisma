@@ -1,0 +1,308 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./jamnagar_pass.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String       @id @default(cuid())
+  authUserId   String?      @unique
+  username     String       @unique
+  name         String
+  email        String?      @unique
+  passwordHash String?
+  role         String       @default("FIELD_USER") // "ADMIN" | "FIELD_USER"
+  phone        String?
+  active       Boolean      @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  createdSubmissions  Submission[] @relation("CreatedBy")
+  approvedSubmissions Submission[] @relation("ApprovedBy")
+  createdBatches      Batch[]      @relation("BatchCreatedBy")
+  auditLogs           AuditLog[]
+  exportBatches       ExportBatch[]
+}
+
+model Vehicle {
+  id                     String       @id @default(cuid())
+  vehicleNumber          String
+  normalizedVehicleNumber String      @unique
+  vehicleType            String
+  classOfVehicle         String?
+  manufacturer           String?
+  model                  String?
+  chassisNumber          String?
+  engineNumber           String?
+  registrationDate       String?
+  insuranceValidity      String?
+  pucValidity            String?
+  fitnessValidity        String?
+  permitValidity         String?
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  submissions            Submission[]
+}
+
+model Driver {
+  id               String       @id @default(cuid())
+  name             String
+  mobile           String?
+  dob              String?
+  gender           String?
+  aadhaarNumber    String?
+  licenseNumber    String?
+  licenseValidTo   String?
+  transportValidTo String?
+  hazardousValidTo String?
+  bloodGroup       String?
+  addressTaluka    String?
+  addressDistrict  String?
+  addressState     String?
+  addressPincode   String?
+  photoUrl         String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  submissions      Submission[]
+}
+
+model Vendor {
+  id                   String       @id @default(cuid())
+  companyName          String       @unique
+  vendorRepresentative String?
+  representativeMobile String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  submissions          Submission[]
+}
+
+model Batch {
+  id          String       @id @default(cuid())
+  batchNumber String       @unique // "BATCH-001", "BATCH-002"
+  eventName   String       @default("Jamnagar Reliance Green Event")
+  eventDate   String?
+  createdById String?
+  createdBy   User?        @relation("BatchCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  status      String       @default("ACTIVE") // "ACTIVE" | "COMPLETED" | "ARCHIVED"
+  recordCount Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  submissions Submission[]
+}
+
+model Submission {
+  id               String       @id @default(cuid())
+  submissionNo     String       @unique
+  passPairId       String?      // Permanent pass pair ID e.g. "PASS-000001"
+  sourceType       String       @default("SOURCE_APP") // "SOURCE_APP" | "SOURCE_MANUAL" | "SOURCE_WHATSAPP"
+  status           String       @default("DRAFT") // "DRAFT", "DOCUMENTS_PENDING", "READY_FOR_FIELD_VERIFICATION", "SUBMITTED", "ADMIN_REVIEW", "ADMIN_CORRECTION_REQUIRED", "APPROVED", "REJECTED", "EXPORTED"
+  currentStep      Int          @default(1)
+
+  // Batch & Sequences
+  batchId          String?
+  batch            Batch?       @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  batchSequence    Int?         @default(1)
+  globalSequence   Int?         @default(1)
+
+  // Operational Status for Master Register
+  epStatus         String       @default("PENDING") // "PENDING" | "APPROVED" | "REJECTED"
+  vapStatus        String       @default("PENDING") // "PENDING" | "APPROVED" | "REJECTED"
+  overallStatus    String       @default("PENDING") // "PENDING" | "APPROVED" | "REJECTED"
+  mailed           Boolean      @default(false)
+  mailedAt         DateTime?
+  mailedById       String?
+  mailedByName     String?
+
+  // Foreign keys
+  vehicleId        String?
+  vehicle          Vehicle?     @relation(fields: [vehicleId], references: [id])
+  
+  driverId         String?
+  driver           Driver?      @relation(fields: [driverId], references: [id])
+
+  vendorId         String?
+  vendor           Vendor?      @relation(fields: [vendorId], references: [id])
+
+  createdById      String
+  createdBy        User         @relation("CreatedBy", fields: [createdById], references: [id])
+
+  approvedById     String?
+  approvedBy       User?        @relation("ApprovedBy", fields: [approvedById], references: [id])
+
+  lastModifiedById String?
+
+  // Snapshot & Editable Manual/Verified details
+  vehicleNumber        String
+  normalizedVehicleNo  String
+  vehicleType          String
+  vehicleModel         String?
+  modelYear            String?
+  seatingCapacity      String?
+  driverName           String
+  driverMobile         String?
+  driverDob            String?
+  companyName          String
+  designation          String       @default("Driver") // "Owner" | "Manager" | "Worker" | "Driver"
+  vendorRepresentative String?
+  vendorRepMobile      String?
+  addressTaluka        String?
+  addressDistrict      String?
+  addressState         String?
+  addressPincode       String?
+  areaOfWork           String       @default("RG") // "RG" | "AF" | "R&R" | "LC1" | "Jetty"
+  accessArea           String?      @default("Reliance Greens / Site")
+  validityRequired     String?
+  remarks              String?
+  rejectionReason      String?
+
+  // Additional OCR/Verified vehicle & driver metadata
+  aadhaarNumber        String?
+  licenseNumber        String?
+  licenseValidTo       String?
+  insurancePolicyNo    String?
+  insuranceCompany     String?
+  insuranceValidTo     String?
+  pucCertificateNo     String?
+  pucValidTo           String?
+  rcOwnerName          String?
+  chassisNumber        String?
+  engineNumber         String?
+
+  // Verification Flags
+  fieldVerified        Boolean      @default(false)
+  adminVerified        Boolean      @default(false)
+  mismatchCount        Int          @default(0)
+
+  // Timestamps
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+  submittedAt          DateTime?
+  approvedAt           DateTime?
+  exportedAt           DateTime?
+
+  // Relations
+  documents            Document[]
+  extractions          DocumentExtraction[]
+  fieldAudits          SubmissionFieldAudit[]
+  epRecord             EPRecord?
+  vapRecord            VAPRecord?
+}
+
+model Document {
+  id           String       @id @default(cuid())
+  submissionId String
+  submission   Submission   @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  category     String       // "RC" | "PUC" | "INSURANCE" | "DRIVING_LICENSE" | "AADHAAR" | "DRIVER_PHOTO" | "OTHER"
+  filePath     String
+  fileName     String
+  fileSize     Int
+  mimeType     String
+  pageNumber   Int          @default(1)
+  uploadedAt   DateTime     @default(now())
+
+  extractions  DocumentExtraction[]
+}
+
+model DocumentExtraction {
+  id              String       @id @default(cuid())
+  submissionId    String
+  submission      Submission   @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  documentId      String?
+  document        Document?    @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  category        String
+  rawAiResponse   String?      // Raw JSON string
+  extractedFields String       // JSON string of { [fieldName]: { value, confidence, rawText } }
+  confidenceScore Float        @default(0.0)
+  warnings        String?      // JSON array of strings
+  status          String       @default("SUCCESS") // "SUCCESS" | "FAILED" | "PARTIAL"
+  createdAt       DateTime     @default(now())
+}
+
+model SubmissionFieldAudit {
+  id               String       @id @default(cuid())
+  submissionId     String
+  submission       Submission   @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  fieldName        String
+  manualValue      String?
+  aiValue          String?
+  finalValue       String?
+  sourceDocument   String?
+  confidence       Float?
+  verifiedById     String?
+  verifiedByName   String?
+  verifiedAt       DateTime     @default(now())
+  mismatchDetected Boolean      @default(false)
+}
+
+model EPRecord {
+  id               String       @id @default(cuid())
+  submissionId     String       @unique
+  submission       Submission   @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  srNo             Int          @default(1)
+  personName       String
+  dob              String?
+  companyName      String
+  designation      String       @default("Driver")
+  aadhaarNo        String?
+  photoUrl         String?
+  validityRequired String?
+  areaOfWork       String       @default("RG")
+  taluka           String?
+  district         String?
+  state            String?
+  pincode          String?
+  mobileNo         String?
+  createdAt        DateTime     @default(now())
+  exportedAt       DateTime?
+}
+
+model VAPRecord {
+  id                      String       @id @default(cuid())
+  submissionId            String       @unique
+  submission              Submission   @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  vehicleNo               String
+  vehicleType             String
+  driverName              String
+  licenseNo               String?
+  originalLicensePresent  String       @default("Yes")
+  originalPucPresent      String       @default("Yes")
+  originalInsurancePresent String      @default("Yes")
+  driverMob               String?
+  vendorRep               String?
+  repMob                  String?
+  createdAt               DateTime     @default(now())
+  exportedAt              DateTime?
+}
+
+model AuditLog {
+  id           String       @id @default(cuid())
+  userId       String?
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userName     String?
+  action       String       // "CREATE_BATCH", "CREATE_SUBMISSION", "UPLOAD_DOC", "EXTRACT_AI", "FIELD_VERIFY", "ADMIN_UPDATE_FIELD", "APPROVE_SUBMISSION", "REJECT_SUBMISSION", "EXPORT_EXCEL", "LOGIN", "MARKED_AS_MAILED", "MARKED_AS_NOT_MAILED"
+  resourceType String       // "BATCH", "SUBMISSION", "DOCUMENT", "USER", "EXPORT"
+  resourceId   String?
+  details      String?      // JSON or text description
+  ipAddress    String?
+  createdAt    DateTime     @default(now())
+}
+
+model ExportBatch {
+  id          String       @id @default(cuid())
+  exportType  String       // "EP" | "VAP" | "PHOTOS" | "BATCH" | "ALL" | "MASTER_REGISTER"
+  dateFilter  String?
+  recordCount Int          @default(0)
+  fileName    String
+  filePath    String?
+  createdById String
+  createdBy   User         @relation(fields: [createdById], references: [id])
+  createdAt   DateTime     @default(now())
+}
