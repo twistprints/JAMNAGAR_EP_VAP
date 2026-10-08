@@ -9,8 +9,9 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const { username, email, loginId, identifier: rawId, password } = body;
+    const { username, email, loginId, identifier: rawId, password, portalType, requiredRole } = body;
 
+    const targetPortal = portalType || requiredRole;
     const identifier = (rawId || loginId || email || username || "").trim().toLowerCase();
 
     if (!identifier || !password) {
@@ -41,6 +42,21 @@ export async function POST(req: NextRequest) {
     if (!user.active) {
       return NextResponse.json(
         { error: "Your account has been deactivated. Please contact an administrator." },
+        { status: 403 }
+      );
+    }
+
+    // 3. Portal-specific role enforcement
+    if (targetPortal === "ADMIN" && user.role !== "ADMIN") {
+      return NextResponse.json(
+        { error: "Access denied. This login is for administrators only." },
+        { status: 403 }
+      );
+    }
+
+    if (targetPortal === "FIELD_USER" && user.role !== "FIELD_USER") {
+      return NextResponse.json(
+        { error: "This login is for authorized field users." },
         { status: 403 }
       );
     }

@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
     if (user.role !== "ADMIN") return requireAdminResponse();
 
     const body = await req.json().catch(() => ({}));
-    const { name, username, email, phone, password, role } = body;
+    const { name, username, email, phone, password, role, active } = body;
 
     if (!name || !password || (!username && !email)) {
       return NextResponse.json(
@@ -129,7 +129,7 @@ export async function POST(req: NextRequest) {
         passwordHash,
         authUserId,
         role: assignedRole,
-        active: true,
+        active: active !== undefined ? Boolean(active) : true,
       },
     });
 

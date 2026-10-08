@@ -46,35 +46,36 @@ export async function middleware(req: NextRequest) {
     }
   }
 
-  // 3. Handle /login page specifically
-  if (pathname === "/login") {
+  // 3. Handle login and public portal selection pages
+  const isLoginPage = pathname === "/admin/login" || pathname === "/user/login" || pathname === "/login";
+  
+  if (isLoginPage) {
     if (session) {
-      // If already logged in, redirect to their home portal
+      // If already logged in, redirect to their assigned portal
       const target = session.role === "ADMIN" ? "/admin" : "/field";
       return NextResponse.redirect(new URL(target, req.url));
     }
     return NextResponse.next();
   }
 
-  // 4. Handle root path `/`
+  // 4. Handle root path `/` (Public portal selector)
   if (pathname === "/") {
-    if (!session) {
-      return NextResponse.redirect(new URL("/login", req.url));
-    }
-    const target = session.role === "ADMIN" ? "/admin" : "/field";
-    return NextResponse.redirect(new URL(target, req.url));
+    return NextResponse.next();
   }
 
-  // 5. Protect API routes (return 401 JSON for unauthorized API calls)
+  // 5. Protect API routes (API route handlers handle detailed auth verification)
   if (pathname.startsWith("/api/")) {
-    // Some endpoints may do fine-grained checks in route handlers
     return NextResponse.next();
   }
 
   // 6. Protect Admin Web Portal (/admin/*)
   if (pathname.startsWith("/admin")) {
+    if (pathname === "/admin/login") {
+      return NextResponse.next();
+    }
+
     if (!session) {
-      const loginUrl = new URL("/login", req.url);
+      const loginUrl = new URL("/admin/login", req.url);
       loginUrl.searchParams.set("redirect", pathname);
       return NextResponse.redirect(loginUrl);
     }
@@ -90,10 +91,11 @@ export async function middleware(req: NextRequest) {
   // 7. Protect Field Web Portal (/field/*)
   if (pathname.startsWith("/field")) {
     if (!session) {
-      const loginUrl = new URL("/login", req.url);
+      const loginUrl = new URL("/user/login", req.url);
       loginUrl.searchParams.set("redirect", pathname);
       return NextResponse.redirect(loginUrl);
     }
+
     return NextResponse.next();
   }
 

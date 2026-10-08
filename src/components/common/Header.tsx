@@ -34,11 +34,16 @@ export const Header: React.FC = () => {
 
   const handleLogout = async () => {
     try {
+      const role = currentUser?.role;
       await fetch("/api/auth/logout", { method: "POST" });
-      router.push("/login");
-      router.refresh();
+      if (role === "ADMIN" || pathname.startsWith("/admin")) {
+        window.location.href = "/admin/login";
+      } else {
+        window.location.href = "/user/login";
+      }
     } catch (e) {
       console.error(e);
+      window.location.href = "/";
     }
   };
 

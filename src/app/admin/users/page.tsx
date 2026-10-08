@@ -36,6 +36,8 @@ export default function AdminUsersPage() {
   const [createEmail, setCreateEmail] = useState("");
   const [createPhone, setCreatePhone] = useState("");
   const [createPassword, setCreatePassword] = useState("");
+  const [createConfirmPassword, setCreateConfirmPassword] = useState("");
+  const [createActive, setCreateActive] = useState(true);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -43,6 +45,7 @@ export default function AdminUsersPage() {
   const [showResetModal, setShowResetModal] = useState(false);
   const [selectedUser, setSelectedUser] = useState<any>(null);
   const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
 
@@ -101,6 +104,11 @@ export default function AdminUsersPage() {
       return;
     }
 
+    if (createPassword !== createConfirmPassword) {
+      setCreateError("Passwords do not match.");
+      return;
+    }
+
     setCreating(true);
     setCreateError(null);
 
@@ -114,6 +122,7 @@ export default function AdminUsersPage() {
           email: createEmail ? createEmail.trim() : undefined,
           phone: createPhone ? createPhone.trim() : undefined,
           password: createPassword,
+          active: createActive,
           role: "FIELD_USER", // Enforce Field Officer creation only
         }),
       });
@@ -135,6 +144,8 @@ export default function AdminUsersPage() {
       setCreateEmail("");
       setCreatePhone("");
       setCreatePassword("");
+      setCreateConfirmPassword("");
+      setCreateActive(true);
       setShowCreateModal(false);
       await fetchUsers();
     } catch (e) {
@@ -462,21 +473,64 @@ export default function AdminUsersPage() {
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Temporary Password *
-                </label>
-                <input
-                  type="password"
-                  value={createPassword}
-                  onChange={(e) => setCreatePassword(e.target.value)}
-                  placeholder="Minimum 6 characters"
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-blue-600"
-                  required
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Password *
+                  </label>
+                  <input
+                    type="password"
+                    value={createPassword}
+                    onChange={(e) => setCreatePassword(e.target.value)}
+                    placeholder="Min. 6 chars"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Confirm Password *
+                  </label>
+                  <input
+                    type="password"
+                    value={createConfirmPassword}
+                    onChange={(e) => setCreateConfirmPassword(e.target.value)}
+                    placeholder="Re-enter password"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    required
+                  />
+                </div>
               </div>
 
-              <div className="pt-2 flex items-center justify-end gap-2">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Initial Status
+                </label>
+                <div className="flex items-center gap-4 pt-1">
+                  <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-slate-700">
+                    <input
+                      type="radio"
+                      name="createStatus"
+                      checked={createActive === true}
+                      onChange={() => setCreateActive(true)}
+                      className="text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-emerald-700 font-bold">Active (Can log in)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-slate-700">
+                    <input
+                      type="radio"
+                      name="createStatus"
+                      checked={createActive === false}
+                      onChange={() => setCreateActive(false)}
+                      className="text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-rose-700 font-bold">Inactive (Blocked)</span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="pt-3 flex items-center justify-end gap-2 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setShowCreateModal(false)}
@@ -487,9 +541,9 @@ export default function AdminUsersPage() {
                 <button
                   type="submit"
                   disabled={creating}
-                  className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl shadow transition-all disabled:opacity-50"
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl shadow transition-all disabled:opacity-50 font-bold"
                 >
-                  {creating ? "Creating..." : "Create Officer Account"}
+                  {creating ? "Creating..." : "Create User"}
                 </button>
               </div>
             </form>
