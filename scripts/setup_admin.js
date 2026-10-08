@@ -17,10 +17,10 @@ async function bootstrapFirstAdmin() {
   console.log("JAMNAGAR PASS MANAGEMENT - FIRST ADMIN SETUP");
   console.log("================================================================");
 
-  const email = process.argv[2] || process.env.ADMIN_EMAIL || "admin@jamnagar.gov.in";
-  const password = process.argv[3] || process.env.ADMIN_PASSWORD || "Admin@Jamnagar2026!";
-  const name = process.argv[4] || process.env.ADMIN_NAME || "System Administrator";
-  const username = process.argv[5] || process.env.ADMIN_USERNAME || "admin";
+  const email = process.argv[2] || process.env.ADMIN_EMAIL || "saketdeva@jamnagar.gov.in";
+  const password = process.argv[3] || process.env.ADMIN_PASSWORD || "8180922746@lucifer1927";
+  const name = process.argv[4] || process.env.ADMIN_NAME || "Saket Deva";
+  const username = process.argv[5] || process.env.ADMIN_USERNAME || "Saketdeva";
 
   if (!email || !password || password.length < 6) {
     console.error("Error: Admin email and a password of at least 6 characters are required.");
